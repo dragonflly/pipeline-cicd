@@ -1,0 +1,219 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Create CodeDeploy EC2/ASG Application and Deployment Group
+  Create cicd_codepipeline_cross_account_role for cross account deployment, in prod account only
+  Create cicd_codedeploy_role for CodeDeploy deployment group
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'CodeDeploy configuration:'
+        Parameters:
+          - CodeDeployApp
+          - CodeDeployGroup
+          - CodeDeployGroupTagKey
+          - CodeDeployGroupTagValue
+          - CodeDeployConfigName
+
+      - Label:
+          default: 'EC2 configuration:'
+        Parameters:
+          - Ec2SshKeyPairName
+
+      - Label:
+          default: 'CFN templates S3 bucket configuration:'
+        Parameters:
+          - TemplateS3BucketURL
+      - Label:
+          default: 'Dev accout information configuration:'
+        Parameters:
+          - DevAccountID
+          - ArtifactsS3BucketURL
+
+Parameters:
+  CodeDeployApp:
+    Description: Name of CodeDeploy Application
+    Type: String
+    Default: CICD-CodeDeploy-Application
+  CodeDeployGroup:
+    Description: Name of CodeDeploy Deployment Group
+    Type: String
+    Default: CICD-Deployment-Group-Prod
+    AllowedValues:
+      - CICD-Deployment-Group-Prod
+      - CICD-Deployment-Group-Dev
+  CodeDeployGroupTagKey:
+    Description: >-
+      Tag Key that will be used by CodeDeploy to identify the existing EC2
+      fleet to be used by the Deployment Group.
+    Type: String
+    Default: Application
+  CodeDeployGroupTagValue:
+    Description: >-
+      Tag Value that will be used by CodeDeploy to identify the existing
+      EC2 fleet to be used by the Deployment Group.
+    Type: String
+    Default: EC2WebApp
+  CodeDeployConfigName:
+    Description: Desired Code Deploy Config Name.
+    Type: String
+    Default: CodeDeployDefault.OneAtATime
+    AllowedValues:
+      - CodeDeployDefault.OneAtATime
+      - CodeDeployDefault.HalfAtATime
+      - CodeDeployDefault.AllAtOnce
+
+  Ec2SshKeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair
+
+  TemplateS3BucketURL:
+    Description: >-
+      URL of CFN templates S3 bucket, Dev&Prod account separately.
+      Example: templates-bucket-name.s3.us-east-1.amazonaws.com
+    Type: String
+    Default: ''
+  DevAccountID:
+    Description: ID of Dev account
+    Type: String
+    Default: ''
+  ArtifactsS3BucketURL:
+    Description: >-
+      URL of artifacts S3 bucket in Dev account, being shared with all accounts.
+      Example: artifacts-bucket-name.s3.us-east-1.amazonaws.com
+    Type: String
+    Default: ''
+
+Mappings:
+  AWSRegionToAMI:
+    us-east-1:
+      AMIID: ami-0ed9277fb7eb570c9
+    us-east-2:
+      AMIID: ami-002068ed284fb165b
+    us-west-1:
+      AMIID: ami-03af6a70ccd8cb578
+    us-west-2:
+      AMIID: ami-00f7e5c52c0f43726
+    ap-south-1:
+      AMIID: ami-052cef05d01020f1d
+    ap-southeast-1:
+      AMIID: ami-0dc5785603ad4ff54
+    eu-central-1:
+      AMIID: ami-05d34d340fb1d89e5
+    eu-west-1:
+      AMIID: ami-04dd4500af104442f
+
+Conditions:
+  CreateCrossAccountRole: !Equals [!Ref CodeDeployGroup, CICD-Deployment-Group-Prod]
+
+Resources:
+  #1 CodeDeploy Application, Deployment Group
+  MyCodeDeployApp:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Ref CodeDeployApp
+
+  ProdDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref MyCodeDeployApp
+      DeploymentGroupName: !Ref CodeDeployGroup
+      DeploymentConfigName: !Ref CodeDeployConfigName
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+          - DEPLOYMENT_STOP_ON_REQUEST
+      ServiceRoleArn: !GetAtt cicdCodeDeployRole.Outputs.CodeDeployRoleARN
+      Ec2TagFilters:
+        - Key: !Ref CodeDeployGroupTagKey
+          Value: !Ref CodeDeployGroupTagValue
+          Type: KEY_AND_VALUE
+
+  #2 EC2 instance
+  SampleLinuxInstance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+              ruby: []
+          files:
+            /home/ec2-user/install:
+              source: !Join
+                - ''
+                - - 'https://aws-codedeploy-'
+                  - !Ref 'AWS::Region'
+                  - .s3.amazonaws.com/latest/install
+              mode: '000755'
+          commands:
+            00-install-agent:
+              command: ./install auto
+              cwd: /home/ec2-user/
+            01-cfn-signal:
+              command: !Join
+                - ''
+                - - '/opt/aws/bin/cfn-signal -e 0 --stack '
+                  - !Ref 'AWS::StackName'
+                  - ' --resource SampleLinuxInstance --region '
+                  - !Ref 'AWS::Region'
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT5M
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !FindInMap [AWSRegionToAMI, !Ref AWS::Region, AMIID]
+      KeyName: !Ref Ec2SshKeyPairName
+      IamInstanceProfile: !GetAtt cicdInstanceProfile.Outputs.InstanceProfileID
+      UserData: !Base64
+        Fn::Join:
+          - ''
+          - - |
+              #!/bin/bash
+            - |
+              yum -y update
+            - |
+              yum -y install cfn-bootstrap
+            - /opt/aws/bin/cfn-init -v
+            - ' --stack '
+            - !Ref 'AWS::StackName'
+            - ' --resource SampleLinuxInstance'
+            - ' --region '
+            - !Ref 'AWS::Region'
+            - |+
+
+      Tags:
+        - Key: !Ref CodeDeployGroupTagKey
+          Value: !Ref CodeDeployGroupTagValue
+        - Key: Name
+          Value: CicdEC2WebApp
+
+  #3 nested CFN templates
+  cicdCrossAccountRole:
+    Description: Create cicd_codepipeline_cross_account_role
+    Type: AWS::CloudFormation::Stack
+    Condition: CreateCrossAccountRole
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3BucketURL}/pipeline-cicd/iam-resource/cicd_codepipeline_cross_account_role.yaml'
+      Parameters:
+        artifactsBucketName: !Select [0, !Split [".", !Ref ArtifactsS3BucketURL]]
+        DevelopmentAccountID: !Ref DevAccountID
+
+  cicdCodeDeployRole:
+    Description: Create cicd_codedeploy_role
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3BucketURL}/pipeline-cicd/iam-resource/cicd_codedeploy_role.yaml'
+
+  cicdInstanceProfile:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3BucketURL}/pipeline-cicd/iam-resource/cicd_ec2_instance_profile.yaml'
+      Parameters:
+        artifactsBucketName: !Select [0, !Split [".", !Ref ArtifactsS3BucketURL]]
+        DevStackRegion: !Select [2, !Split [".", !Ref ArtifactsS3BucketURL]]
+        DevAccountID: !Ref DevAccountID

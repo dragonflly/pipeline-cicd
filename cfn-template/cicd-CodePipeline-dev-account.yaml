@@ -1,0 +1,393 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Create CICD by AWS CodeCommit, CodeBuild, CodeDeploy and CodePipeline.
+  Deploy cross Dev&Prod AWS accounts.
+  Supports deploy compute platform:
+    - EC2 instance
+    - ASG
+    - ECS EC2 launch type
+    - ECS fargate launch type, Blue/Green deployment
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'CodePipeline configuration:'
+        Parameters:
+          - CodePipelineName
+
+      - Label:
+          default: 'CodeCommit configuration:'
+        Parameters:
+          - CodeCommitWebAppRepo
+          - CodeCommitMainBranchName
+
+      - Label:
+          default: 'CodeBuild configuration:'
+        Parameters:
+          - CodeBuildProjectName
+
+      - Label:
+          default: 'CodeDeploy configuration:'
+        Parameters:
+          - CodeDeployApp
+          - CodeDeployGroupDev
+          - CodeDeployGroupProd
+
+      - Label:
+          default: 'CFN templates S3 bucket configuration:'
+        Parameters:
+          - TemplateS3Bucket
+      - Label:
+          default: 'Prod accout information configuration:'
+        Parameters:
+          - ProdAccountID
+      - Label:
+          default: 'Artifacts S3 bucket configuration:'
+        Parameters:
+          - ArtifactsS3Bucket
+
+Parameters:
+  CodePipelineName:
+    Type: String
+    Default: CICDWebAppPipeline
+    Description: Enter name of the new CodePipeline to be created
+
+  CodeCommitWebAppRepo:
+    Type: String
+    Default: CICDWebAppRepo
+    Description: Enter name of the new CodeCommit repository
+  CodeCommitMainBranchName:
+    Type: String
+    Default: master
+    Description: Enter main branch name on your CodeCommit repository
+
+  CodeBuildProjectName:
+    Type: String
+    Default: CICDWebAppBuild
+    Description: Enter name of the new CodeBuild project
+
+  CodeDeployApp:
+    Type: String
+    Default: CICD-CodeDeploy-Application
+    Description: Enter name of CodeDeploy Application
+  CodeDeployGroupDev:
+    Type: String
+    Default: CICD-Deployment-Group-Dev
+    AllowedValues:
+      - CICD-Deployment-Group-Prod
+      - CICD-Deployment-Group-Dev
+    Description: Enter name of CodeDeploy Deployment Group in Dev account
+  CodeDeployGroupProd:
+    Type: String
+    Default: CICD-Deployment-Group-Prod
+    AllowedValues:
+      - CICD-Deployment-Group-Prod
+      - CICD-Deployment-Group-Dev
+    Description: Enter name of CodeDeploy Deployment Group in Prod account
+
+  TemplateS3Bucket:
+    Description: >-
+      URL of CFN templates S3 bucket, Dev&Prod account separately.
+      Example: templates-bucket-name.s3.us-east-1.amazonaws.com
+    Type: String
+    Default: ''
+  ProdAccountID:
+    Description: ID of Production account
+    Type: String
+    Default: ''
+  ArtifactsS3Bucket:
+    Type: String
+    Default: ''
+    Description: >-
+      URL of artifacts S3 bucket in Dev account, being shared with all accounts.
+      Example: artifacts-bucket-name.s3.us-east-1.amazonaws.com
+
+Resources:
+  #1 CodePipeline
+  cicdCodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Ref CodePipelineName
+      RoleArn: !GetAtt
+                - cicdCodePipelineRole
+                - Outputs.codepipelineRoleARN
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: ApplicationSource
+              ActionTypeId:
+                Version: 1
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: WebAppRepo-SourceArtifact
+              Configuration:
+                RepositoryName: !Ref CodeCommitWebAppRepo
+                BranchName: !Ref CodeCommitMainBranchName
+                PollForSourceChanges: false
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: ApplicationBuild
+              InputArtifacts:
+                - Name: WebAppRepo-SourceArtifact
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: artifactDev
+                - Name: artifactProd
+              Configuration:
+                ProjectName: !Ref cicdCodeBuildProject
+              RunOrder: 2
+        - Name: DevelopDeploy
+          Actions:
+            - Name: DevelopDeploy
+              InputArtifacts:
+                - Name: artifactDev
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CodeDeploy
+              Configuration:
+                ApplicationName: !Ref CodeDeployApp
+                DeploymentGroupName: !Ref CodeDeployGroupDev
+              RunOrder: 3
+            - Name: DeployToProdAccountApproval
+              InputArtifacts: []
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Version: 1
+                Provider: Manual
+              RunOrder: 4
+        - Name: ProdDeploy
+          Actions:
+            - Name: ProdExternalDeploy
+              InputArtifacts:
+                - Name: artifactProd
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CodeDeploy
+              Configuration:
+                ApplicationName: !Ref CodeDeployApp
+                DeploymentGroupName: !Ref CodeDeployGroupProd
+              RoleArn: !Sub 'arn:aws:iam::${ProdAccountID}:role/cicd_codepipeline_cross_account_role'
+              RunOrder: 5
+
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactsS3Bucket
+        EncryptionKey:
+          Id: !GetAtt
+            - myKMSKey
+            - Arn
+          Type: KMS
+
+  #2 CodeCommit Repository
+  MyWebAppRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Ref CodeCommitWebAppRepo
+      RepositoryDescription: A sample httpd web application
+
+  #3 CodeBuild Project
+  cicdCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    DependsOn: MyWebAppRepo
+    Properties:
+      Name: !Ref CodeBuildProjectName
+      Description: This is a sample web app project
+      ServiceRole: !GetAtt
+                    - cicdCodeBuildRole
+                    - Outputs.codebuildRoleARN
+      Artifacts:
+        Type: S3
+        Location: !Ref ArtifactsS3Bucket
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        #for ECS build only, docker feature
+        PrivilegedMode: True
+        EnvironmentVariables: []
+      Source:
+        Location: !GetAtt
+          - MyWebAppRepo
+          - CloneUrlHttp
+        Type: CODECOMMIT
+      TimeoutInMinutes: 30
+
+  #CodeDeploy deployment group, defined by CFN templates separately
+
+  #4 Unique S3 bucket for artifacts, being shared with all accounts (Dev&Prod)
+  artifactS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref ArtifactsS3Bucket
+  artifactS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref artifactS3Bucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyUnEncryptedObjectUploads
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactsS3Bucket}/*'
+            Condition:
+              StringNotEquals:
+                's3:x-amz-server-side-encryption': !Sub '${AWS::Partition}:kms'
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactsS3Bucket}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+          - Sid: AllowCrossAccountRWAccessForCodeDeployService
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${ProdAccountID}:root'
+            Action:
+              - 's3:Get*'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactsS3Bucket}/*'
+          - Sid: AllowCrossAccountListForCodeDeployService
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${ProdAccountID}:root'
+            Action: 's3:ListBucket'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactsS3Bucket}'
+
+  #KMS key to encrypt all artifacts in artifactS3Bucket
+  myKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: An symmetric CMK key for cicd artifacts
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: kms-key-policy
+        Statement:
+          - Sid: >-
+              Allow access through Amazon S3 for all principals in the account
+              that are authorized to use Amazon S3
+            Effect: Allow
+            Principal:
+              AWS: '*'
+            Action:
+              - 'kms:Encrypt'
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:DescribeKey'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:CallerAccount': !Sub '${AWS::AccountId}'
+                'kms:ViaService': !Sub 's3.${AWS::Region}.amazonaws.com'
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow use of the key
+            Effect: Allow
+            Principal:
+              AWS:
+                - !GetAtt
+                  - cicdCodePipelineRole
+                  - Outputs.codepipelineRoleARN
+                - !GetAtt
+                  - cicdCodeBuildRole
+                  - Outputs.codebuildRoleARN
+                - !Sub 'arn:aws:iam::${ProdAccountID}:root'
+            Action:
+              - 'kms:Encrypt'
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:DescribeKey'
+            Resource: '*'
+
+  myKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/MyCICDKey
+      TargetKeyId: !Ref myKMSKey
+
+  #5 CloudWatch Event Rule, to trigger CodePipeline build
+  CloudWatchEventRuleMasterPipeline:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Ref CodePipelineName
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - CodeCommit Repository State Change
+        resources:
+          - !Join
+            - ''
+            - - 'arn:'
+              - !Ref 'AWS::Partition'
+              - ':codecommit:'
+              - !Ref 'AWS::Region'
+              - ':'
+              - !Ref 'AWS::AccountId'
+              - ':'
+              - !Ref CodeCommitWebAppRepo
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - !Ref CodeCommitMainBranchName
+      Targets:
+        - Arn: !Join
+            - ''
+            - - 'arn:'
+              - !Ref 'AWS::Partition'
+              - ':codepipeline:'
+              - !Ref 'AWS::Region'
+              - ':'
+              - !Ref 'AWS::AccountId'
+              - ':'
+              - !Ref CodePipelineName
+          RoleArn: !GetAtt
+                    - cicdCWEventRuleRole
+                    - Outputs.CWEventRuleRoleARN
+          Id: codepipeline-AppPipeline
+
+  #6 nested CFN templates
+  cicdCodeBuildRole:
+    Description: Create cicd_codebuild_role
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3Bucket}.s3.${AWS::Region}.amazonaws.com/pipeline-cicd/iam-resource/cicd_codebuild_role.yaml'
+
+  cicdCWEventRuleRole:
+    Description: Create cicd_cloudwatch_event_rule_role
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3Bucket}.s3.${AWS::Region}.amazonaws.com/pipeline-cicd/iam-resource/cicd_codepipeline_CW_event_role.yaml'
+
+  cicdCodePipelineRole:
+    Description: Create cicd_codepipeline_role
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3Bucket}.s3.${AWS::Region}.amazonaws.com/pipeline-cicd/iam-resource/cicd_codepipeline_role.yaml'
+      Parameters:
+        ProductionAccountID: !Ref ProdAccountID

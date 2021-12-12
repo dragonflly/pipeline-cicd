@@ -1,0 +1,35 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+   Role of CloudWatch event rule, to trigger CodePipeline execution, in dev account
+
+Resources:
+  CWEventRulePolicies:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: cicd_cloudwatch_event_rule_role_policy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'codepipeline:StartPipelineExecution'
+            Resource:
+              - !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:*'
+      Roles:
+        - !Ref CWEventRuleRole
+
+  CWEventRuleRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: 'sts:AssumeRole'
+      RoleName: cicd_cloudwatch_event_rule_role
+      Path: /
+
+Outputs:
+  CWEventRuleRoleARN:
+    Value: !GetAtt CWEventRuleRole.Arn

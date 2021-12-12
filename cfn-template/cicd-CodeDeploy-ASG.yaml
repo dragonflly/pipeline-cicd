@@ -1,0 +1,332 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'CodeDeploy deloyment group configuration:'
+        Parameters:
+          - CodeDeployApp
+          - CodeDeployGroup
+          - CodeDeployConfigName
+
+      - Label:
+          default: 'Auto Scaling Group configuration:'
+        Parameters:
+          - ASGDesiredCapacity
+          - ASGMaxSize
+          - KeyPairName
+
+      - Label:
+          default: 'Network configuration:'
+        Parameters:
+          - VpcCIDR
+          - PublicSubnetOneCIDR
+          - PublicSubnetTwoCIDR
+          - PrivateSubnetOneCIDR
+          - PrivateSubnetTwoCIDR
+
+      - Label:
+          default: 'CFN templates S3 bucket configuration:'
+        Parameters:
+          - TemplateS3BucketURL
+      - Label:
+          default: 'Dev accout information configuration:'
+        Parameters:
+          - DevAccountID
+          - ArtifactsS3BucketURL
+
+Parameters:
+  CodeDeployApp:
+    Description: Name of CodeDeploy Application
+    Type: String
+    Default: CICD-CodeDeploy-Application
+  CodeDeployGroup:
+    Description: Name of CodeDeploy Deployment Group
+    Type: String
+    Default: CICD-Deployment-Group-Prod
+    AllowedValues:
+      - CICD-Deployment-Group-Prod
+      - CICD-Deployment-Group-Dev
+  CodeDeployConfigName:
+    Description: Desired Code Deploy Config Name.
+    Type: String
+    Default: CodeDeployDefault.OneAtATime
+    AllowedValues:
+      - CodeDeployDefault.OneAtATime
+      - CodeDeployDefault.HalfAtATime
+      - CodeDeployDefault.AllAtOnce
+
+  ASGDesiredCapacity:
+    Type: Number
+    Default: 2
+    Description: Desired size of ASG
+  ASGMaxSize:
+    Type: Number
+    Default: 3
+    Description: Maxmum size of ASG
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair
+
+  VpcCIDR:
+    Description: CIDR for VPC
+    Type: String
+    Default: 10.192.0.0/16
+  PublicSubnetOneCIDR:
+    Description: CIDR for the public subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.10.0/24
+  PublicSubnetTwoCIDR:
+    Description: CIDR for the public subnet in the second Availability Zone
+    Type: String
+    Default: 10.192.11.0/24
+  PrivateSubnetOneCIDR:
+    Description: CIDR for the private subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.20.0/24
+  PrivateSubnetTwoCIDR:
+    Description: CIDR for the private subnet in the second Availability Zone
+    Type: String
+    Default: 10.192.21.0/24
+
+  TemplateS3BucketURL:
+    Description: >-
+      URL of CFN templates S3 bucket, Dev&Prod account separately.
+      Example: templates-bucket-name.s3.us-east-1.amazonaws.com
+    Type: String
+    Default: ''
+  DevAccountID:
+    Description: ID of Dev account
+    Type: String
+    Default: ''
+  ArtifactsS3BucketURL:
+    Description: >-
+      URL of artifacts S3 bucket in Dev account, being shared with all accounts.
+      Example: artifacts-bucket-name.s3.us-east-1.amazonaws.com
+    Type: String
+    Default: ''
+
+Mappings:
+  AWSRegionToAMI:
+    us-east-1:
+      AMIID: ami-0ed9277fb7eb570c9
+    us-east-2:
+      AMIID: ami-002068ed284fb165b
+    us-west-1:
+      AMIID: ami-03af6a70ccd8cb578
+    us-west-2:
+      AMIID: ami-00f7e5c52c0f43726
+    ap-south-1:
+      AMIID: ami-052cef05d01020f1d
+    ap-southeast-1:
+      AMIID: ami-0dc5785603ad4ff54
+    eu-central-1:
+      AMIID: ami-05d34d340fb1d89e5
+    eu-west-1:
+      AMIID: ami-04dd4500af104442f
+
+Conditions:
+  CreateCrossAccountRole: !Equals [!Ref CodeDeployGroup, CICD-Deployment-Group-Prod]
+
+Resources:
+  #1 CodeDeploy Application, Deployment Group
+  WebappApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Ref CodeDeployApp
+
+  WebappDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref WebappApplication
+      DeploymentGroupName: !Ref CodeDeployGroup
+      DeploymentConfigName: !Ref CodeDeployConfigName
+      ServiceRoleArn: !GetAtt cicdCodeDeployRole.Outputs.CodeDeployRoleARN
+      AutoScalingGroups:
+      - !Ref WebAutoScalingGroup
+
+  #2 ALB, Listener, Target Group
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets:
+        - !GetAtt cicdVPCSubnets.Outputs.PublicSubnetOneID
+        - !GetAtt cicdVPCSubnets.Outputs.PublicSubnetTwoID
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: allow access to ALB from internet
+      VpcId: !GetAtt cicdVPCSubnets.Outputs.cicdVPCID
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      UnhealthyThresholdCount: 2
+      HealthyThresholdCount: 2
+      HealthCheckPath: /
+      Port: 80
+      Protocol: HTTP
+      VpcId: !GetAtt cicdVPCSubnets.Outputs.cicdVPCID
+
+  #3 ASG, EC2 Launch Template
+  WebAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    CreationPolicy:
+      ResourceSignal:
+        Count: !Ref ASGDesiredCapacity
+        Timeout: PT5M
+    Properties:
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 300
+      MinSize: 1
+      MaxSize: !Ref ASGMaxSize
+      DesiredCapacity: !Ref ASGDesiredCapacity
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebappLaunchTemplate
+        Version: !GetAtt WebappLaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier:
+        - !GetAtt cicdVPCSubnets.Outputs.PrivateSubnetOneID
+        - !GetAtt cicdVPCSubnets.Outputs.PrivateSubnetTwoID
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+      Tags:
+        - Key: Name
+          Value: CicdASGWebApp
+          PropagateAtLaunch: true
+
+  WebappLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+              ruby: []
+          files:
+            /home/ec2-user/install:
+              source: !Join
+                - ''
+                - - 'https://aws-codedeploy-'
+                  - !Ref 'AWS::Region'
+                  - .s3.amazonaws.com/latest/install
+              mode: '000755'
+          commands:
+            00-install-agent:
+              command: ./install auto
+              cwd: /home/ec2-user/
+            01-cfn-signal:
+              command: !Join
+                - ''
+                - - '/opt/aws/bin/cfn-signal -e 0 --stack '
+                  - !Ref 'AWS::StackName'
+                  - ' --resource WebAutoScalingGroup --region '
+                  - !Ref 'AWS::Region'
+    Properties:
+      LaunchTemplateName: cicdASGLaunchTemplate
+      LaunchTemplateData:
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: true
+            Groups:
+              - !Ref WebappSecurityGroup
+            DeleteOnTermination: true
+        ImageId: !FindInMap [AWSRegionToAMI, !Ref AWS::Region, AMIID]
+        InstanceType: t2.micro
+        KeyName: !Ref KeyPairName
+        IamInstanceProfile:
+          Arn: !GetAtt cicdInstanceProfile.Outputs.InstanceProfileArn
+        UserData: !Base64
+          Fn::Join:
+            - ''
+            - - |
+                #!/bin/bash
+              - |
+                yum -y update
+              - |
+                yum -y install cfn-bootstrap
+              - /opt/aws/bin/cfn-init -v
+              - ' --stack '
+              - !Ref 'AWS::StackName'
+              - ' --resource WebappLaunchTemplate'
+              - ' --region '
+              - !Ref 'AWS::Region'
+              - |+
+
+  WebappSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: allow access to Webapp from ALB
+      VpcId: !GetAtt cicdVPCSubnets.Outputs.cicdVPCID
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        SourceSecurityGroupId: !Ref ALBSecurityGroup
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+
+  #4 nested CFN templates
+  cicdCrossAccountRole:
+    Description: Create cicd_codepipeline_cross_account_role
+    Type: AWS::CloudFormation::Stack
+    Condition: CreateCrossAccountRole
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3BucketURL}/pipeline-cicd/iam-resource/cicd_codepipeline_cross_account_role.yaml'
+      Parameters:
+        artifactsBucketName: !Select [0, !Split [".", !Ref ArtifactsS3BucketURL]]
+        DevelopmentAccountID: !Ref DevAccountID
+
+  cicdCodeDeployRole:
+    Description: Create cicd_codedeploy_role
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3BucketURL}/pipeline-cicd/iam-resource/cicd_codedeploy_role.yaml'
+
+  cicdInstanceProfile:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3BucketURL}/pipeline-cicd/iam-resource/cicd_ec2_instance_profile.yaml'
+      Parameters:
+        artifactsBucketName: !Select [0, !Split [".", !Ref ArtifactsS3BucketURL]]
+        DevStackRegion: !Select [2, !Split [".", !Ref ArtifactsS3BucketURL]]
+        DevAccountID: !Ref DevAccountID
+
+  cicdVPCSubnets:
+    Description: Create VPC and Subnets
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3BucketURL}/pipeline-cicd/cfn-template/cicd-VPC-Subnets.yaml'
+      Parameters:
+        VpcCIDR: !Ref VpcCIDR
+        PublicSubnetOneCIDR: !Ref PublicSubnetOneCIDR
+        PublicSubnetTwoCIDR: !Ref PublicSubnetTwoCIDR
+        PrivateSubnetOneCIDR: !Ref PrivateSubnetOneCIDR
+        PrivateSubnetTwoCIDR: !Ref PrivateSubnetTwoCIDR
+
+Outputs:
+  WebappUrl:
+    Description: ALB URL
+    Value: !GetAtt ApplicationLoadBalancer.DNSName

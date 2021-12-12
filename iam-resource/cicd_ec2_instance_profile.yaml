@@ -1,0 +1,69 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  EC2 instance profile, in dev & prod account
+
+Parameters:
+  artifactsBucketName:
+    Description: artifacts S3 bucket in Dev account, being shared with all accounts
+    Type: String
+    Default: ''
+  DevStackRegion:
+    Description: Region of Dev stack
+    Type: String
+    Default: ''
+  DevAccountID:
+    Description: ID of Dev account
+    Type: String
+    Default: ''
+
+Resources:
+  InstanceProfileRolePolicies:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: cicdInstanceProfilePolicy
+      PolicyDocument:
+        Statement:
+          - Sid: AllowAccesstoKMSKeyToDecryptArtefact
+            Effect: Allow
+            Action:
+              - 'kms:DescribeKey'
+              - 'kms:GenerateDataKey*'
+              - 'kms:Encrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:Decrypt'
+            Resource: !Sub 'arn:aws:kms:${DevStackRegion}:${DevAccountID}:key/*'
+          - Sid: AllowListS3Objects
+            Effect: Allow
+            Action:
+              - 's3:Get*'
+            Resource:
+              - !Sub 'arn:aws:s3:::${artifactsBucketName}/*'
+      Roles:
+        - !Ref CicdInstanceRole
+
+  CicdInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      RoleName: cicd_ec2_instance_role
+      Path: /
+
+  cicdInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref CicdInstanceRole
+
+Outputs:
+  InstanceProfileID:
+    Value: !Ref cicdInstanceProfile
+  InstanceProfileArn:
+    Value: !GetAtt cicdInstanceProfile.Arn

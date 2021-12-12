@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  CodeDeploy ECS role, in dev & prod account
+
+Parameters:
+  artifactsBucketName:
+    Description: artifacts S3 bucket in Dev account, being shared with all accounts
+    Type: String
+    Default: ''
+  DevAccountID:
+    Description: ID of Dev account
+    Type: String
+    Default: ''
+  DevStackRegion:
+    Description: Region of Dev stack
+    Type: String
+    Default: ''
+
+Resources:
+  EcsRoleForCodeDeploy:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: CrossAccountReadArtifacts
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:DescribeKey'
+                  - 'kms:GenerateDataKey*'
+                  - 'kms:Encrypt'
+                  - 'kms:ReEncrypt*'
+                  - 'kms:Decrypt'
+                Resource: !Sub 'arn:aws:kms:${DevStackRegion}:${DevAccountID}:key/*'
+              - Effect: Allow
+                Action:
+                  - 's3:Get*'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${artifactsBucketName}/*'
+      AssumeRolePolicyDocument:
+        Version: 2008-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ codedeploy.amazonaws.com ]
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS'
+        - 'arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess'
+      RoleName: CodeDeployECSBlueGreenRole
+
+Outputs:
+  CodeDeployRoleARN:
+    Value: !GetAtt EcsRoleForCodeDeploy.Arn

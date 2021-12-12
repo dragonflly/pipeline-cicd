@@ -1,0 +1,10 @@
+version: 0.0
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        TaskDefinition: "arn:aws:ecs:us-east-1:222222222222:task-definition/cicd-ecs-container-web-TD"
+        LoadBalancerInfo:
+          ContainerName: "fargate-web-container"
+          ContainerPort: 80
+        PlatformVersion: "LATEST"

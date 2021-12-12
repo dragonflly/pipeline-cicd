@@ -1,0 +1,337 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'CodeDeploy Application configuration:'
+        Parameters:
+          - CodeDeployApp
+          - CodeDeployGroup
+
+      - Label:
+          default: 'ECS Task definitions:'
+        Parameters:
+          - ContainerImageUri
+          - ContainerPort
+          - ContainerCpu
+          - ContainerMemory
+          - DesiredTaskCount
+
+      - Label:
+          default: 'ECS Fargate awsvpc network configuration:'
+        Parameters:
+          - VpcCIDR
+          - PublicSubnetOneCIDR
+          - PublicSubnetTwoCIDR
+          - PrivateSubnetOneCIDR
+          - PrivateSubnetTwoCIDR
+
+      - Label:
+          default: 'CFN templates S3 bucket configuration:'
+        Parameters:
+          - TemplateS3BucketURL
+      - Label:
+          default: 'Dev accout information configuration:'
+        Parameters:
+          - DevAccountID
+          - ArtifactsS3BucketURL
+
+Parameters:
+  CodeDeployApp:
+    Description: Name of CodeDeploy Application
+    Type: String
+    Default: CICD-CodeDeploy-Application
+  CodeDeployGroup:
+    Description: Name of CodeDeploy Deployment Group
+    Type: String
+    Default: CICD-Deployment-Group-Prod
+    AllowedValues:
+      - CICD-Deployment-Group-Prod
+      - CICD-Deployment-Group-Dev
+
+  ContainerImageUri:
+    Type: String
+    Default: ''
+    Description: Docker image URI
+  ContainerPort:
+    Type: Number
+    Default: 80
+    Description: Docker application port for binding
+  ContainerCpu:
+    Type: Number
+    Default: 256
+    Description: How much CPU to give the container. 1024 is 1 CPU
+  ContainerMemory:
+    Type: Number
+    Default: 512
+    Description: How much memory in megabytes to give the container
+  DesiredTaskCount:
+    Type: Number
+    Default: 2
+    Description: How many copies of the service task to run
+
+  VpcCIDR:
+    Description: CIDR for VPC
+    Type: String
+    Default: 10.192.0.0/16
+  PublicSubnetOneCIDR:
+    Description: CIDR for the public subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.10.0/24
+  PublicSubnetTwoCIDR:
+    Description: CIDR for the public subnet in the second Availability Zone
+    Type: String
+    Default: 10.192.11.0/24
+  PrivateSubnetOneCIDR:
+    Description: CIDR for the private subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.20.0/24
+  PrivateSubnetTwoCIDR:
+    Description: CIDR for the private subnet in the second Availability Zone
+    Type: String
+    Default: 10.192.21.0/24
+
+  TemplateS3BucketURL:
+    Description: >-
+      URL of CFN templates S3 bucket, Dev&Prod account separately.
+      Example: templates-bucket-name.s3.us-east-1.amazonaws.com
+    Type: String
+    Default: ''
+  DevAccountID:
+    Description: ID of Dev account
+    Type: String
+    Default: ''
+  ArtifactsS3BucketURL:
+    Description: >-
+      URL of artifacts S3 bucket in Dev account, being shared with all accounts.
+      Example: artifacts-bucket-name.s3.us-east-1.amazonaws.com
+    Type: String
+    Default: ''
+
+Conditions:
+  CreateCrossAccountRole: !Equals [!Ref CodeDeployGroup, CICD-Deployment-Group-Prod]
+
+Resources:
+  #1 CodeDeploy Application
+  WebappApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Ref CodeDeployApp
+      ComputePlatform: ECS
+
+  #2 ECS Cluster, Service, Task Definition
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: cicd-ecs-cluster
+
+  ECSservice:
+    Type: AWS::ECS::Service
+    DependsOn: PublicLoadBalancerListener1
+    Properties:
+      Cluster: !Ref ECSCluster
+      ServiceName: cicd-ecs-service
+      TaskDefinition: !Ref ECStaskdefinition
+      LoadBalancers:
+        - TargetGroupArn: !Ref TargetGroup1
+          ContainerName: fargate-web-container
+          ContainerPort: !Ref ContainerPort
+      LaunchType: FARGATE
+      SchedulingStrategy: REPLICA
+      DeploymentController:
+        Type: CODE_DEPLOY
+      PlatformVersion: LATEST
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref ContainerSecurityGroup
+          Subnets:
+            - !GetAtt cicdVPCSubnets.Outputs.PrivateSubnetOneID
+            - !GetAtt cicdVPCSubnets.Outputs.PrivateSubnetTwoID
+      DesiredCount: !Ref DesiredTaskCount
+
+  ContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the Container
+      VpcId: !GetAtt cicdVPCSubnets.Outputs.cicdVPCID
+      #Container allows inbound from ALB only
+      SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            SourceSecurityGroupId: !Ref PublicLoadBalancerSG
+          - IpProtocol: tcp
+            FromPort: 8080
+            ToPort: 8080
+            SourceSecurityGroupId: !Ref PublicLoadBalancerSG
+
+  ECStaskdefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: cicd-ecs-container-web-TD
+      Cpu: !Ref ContainerCpu
+      Memory: !Ref ContainerMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: fargate-web-container
+          Cpu: !Ref ContainerCpu
+          Memory: !Ref ContainerMemory
+          Image: !Ref ContainerImageUri
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: !Sub ${AWS::StackName}-svc
+          #html page display hostname for each container
+          command:
+            - >-
+              /bin/sh -c "CONTAINERHOSTNAME=$(cat /etc/hostname)
+              && sed -i \"s/CONTAINER ID/Container hostname \$CONTAINERHOSTNAME/g\" /usr/local/apache2/htdocs/index.html
+              && httpd-foreground"
+          entryPoint: [sh, -c]
+          essential: true
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: [sts:AssumeRole]
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+
+  ECSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub ${AWS::StackName}-loggroup-svc
+
+  #3 ALB, Listener, Target Group
+  PublicLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: ECSALB
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+      - Key: idle_timeout.timeout_seconds
+        Value: 30
+      Subnets:
+        - !GetAtt cicdVPCSubnets.Outputs.PublicSubnetOneID
+        - !GetAtt cicdVPCSubnets.Outputs.PublicSubnetTwoID
+      SecurityGroups: [!Ref PublicLoadBalancerSG]
+
+  PublicLoadBalancerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the public facing load balancer
+      VpcId: !GetAtt cicdVPCSubnets.Outputs.cicdVPCID
+      SecurityGroupIngress:
+          # Allow access to ALB from anywhere on the internet
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: 0.0.0.0/0
+          - IpProtocol: tcp
+            FromPort: 8080
+            ToPort: 8080
+            CidrIp: 0.0.0.0/0
+
+  PublicLoadBalancerListener1:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup1
+          Type: forward
+      LoadBalancerArn: !Ref PublicLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  PublicLoadBalancerListener2:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup2
+          Type: forward
+      LoadBalancerArn: !Ref PublicLoadBalancer
+      Port: 8080
+      Protocol: HTTP
+
+  TargetGroup1:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      TargetType: ip
+      HealthCheckIntervalSeconds: 6
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !GetAtt cicdVPCSubnets.Outputs.cicdVPCID
+      Name: cicd-ecs-bluegreen-TargetGroup1
+
+  TargetGroup2:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      TargetType: ip
+      HealthCheckIntervalSeconds: 6
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !GetAtt cicdVPCSubnets.Outputs.cicdVPCID
+      Name: cicd-ecs-bluegreen-TargetGroup2
+
+  #4 nested CFN templates
+  cicdCrossAccountRole:
+    Description: Create cicd_codepipeline_cross_account_role
+    Type: AWS::CloudFormation::Stack
+    Condition: CreateCrossAccountRole
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3BucketURL}/pipeline-cicd/iam-resource/cicd_codepipeline_cross_account_role.yaml'
+      Parameters:
+        artifactsBucketName: !Select [0, !Split [".", !Ref ArtifactsS3BucketURL]]
+        DevelopmentAccountID: !Ref DevAccountID
+
+  cicdCodeDeployECSRole:
+    Description: Create CodeDeployECSBlueGreenRole
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3BucketURL}/pipeline-cicd/iam-resource/cicd_codedeploy_ecs_role.yaml'
+      Parameters:
+        artifactsBucketName: !Select [0, !Split [".", !Ref ArtifactsS3BucketURL]]
+        DevStackRegion: !Select [2, !Split [".", !Ref ArtifactsS3BucketURL]]
+        DevAccountID: !Ref DevAccountID
+
+  cicdVPCSubnets:
+    Description: Create VPC and Subnets
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3BucketURL}/pipeline-cicd/cfn-template/cicd-VPC-Subnets.yaml'
+      Parameters:
+        VpcCIDR: !Ref VpcCIDR
+        PublicSubnetOneCIDR: !Ref PublicSubnetOneCIDR
+        PublicSubnetTwoCIDR: !Ref PublicSubnetTwoCIDR
+        PrivateSubnetOneCIDR: !Ref PrivateSubnetOneCIDR
+        PrivateSubnetTwoCIDR: !Ref PrivateSubnetTwoCIDR
+
+Outputs:
+  ExternalUrl:
+    Description: The url of the ALB
+    Value: !GetAtt PublicLoadBalancer.DNSName

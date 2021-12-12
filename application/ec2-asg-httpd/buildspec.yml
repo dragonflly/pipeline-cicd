@@ -1,0 +1,31 @@
+version: 0.2
+
+phases:
+    install:
+        runtime-versions:
+            nodejs: 10
+        commands:
+            - echo "Installing something"
+    pre_build:
+        commands:
+            - echo "We are in the pre build phase"
+    build:
+        commands:
+            - echo "We are in the build block"
+            - echo "Create html page....."
+            - echo "-------------------has been built by CodeBuild-------------------" >> index.html
+    post_build:
+        commands:
+            - echo "We are in the post build phase"
+
+artifacts:
+  files:
+  secondary-artifacts:
+    artifactDev:
+      base-directory: $CODEBUILD_SRC_DIR
+      files:
+        - '**/*'
+    artifactProd:
+      base-directory: $CODEBUILD_SRC_DIR
+      files:
+        - '**/*'

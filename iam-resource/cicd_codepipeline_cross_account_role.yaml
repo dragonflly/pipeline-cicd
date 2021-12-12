@@ -1,0 +1,55 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Cross account role for CodeDeploy
+  Created in prod account, assumed by dev account
+
+Parameters:
+  artifactsBucketName:
+    Description: artifacts S3 bucket in Dev account, being shared with all accounts
+    Type: String
+    Default: ''
+  DevelopmentAccountID:
+    Description: ID of dev account
+    Type: String
+    Default: ''
+
+Resources:
+  CrossAccountPolicies:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: cicd_codepipeline_cross_account_policy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowCodeDeployServiceListS3Objects
+            Effect: Allow
+            Action:
+              - 's3:GetObject*'
+            Resource: !Sub 'arn:aws:s3:::${artifactsBucketName}/*'
+          - Sid: AllowCodeDeployServiceDeployment
+            Effect: Allow
+            Action:
+              - 'codedeploy:CreateDeployment'
+              - 'codedeploy:GetDeployment'
+              - 'codedeploy:GetDeploymentConfig'
+              - 'codedeploy:GetApplicationRevision'
+              - 'codedeploy:RegisterApplicationRevision'
+            Resource: '*'
+      Roles:
+        - !Ref CrossAccountRole
+
+  CrossAccountRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${DevelopmentAccountID}:root'
+            Action: 'sts:AssumeRole'
+      RoleName: cicd_codepipeline_cross_account_role
+      Path: /
+
+Outputs:
+  CrossAccountRoleARN:
+    Value: !GetAtt CrossAccountRole.Arn

@@ -1,0 +1,503 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'CodeDeploy Application configuration:'
+        Parameters:
+          - CodeDeployApp
+          - CodeDeployGroup
+
+      - Label:
+          default: 'ECS configuration:'
+        Parameters:
+          - KeyPairName
+          - ASGDesiredCapacity
+          - ASGMaxSize
+          - ContainerImageUri
+          - DesiredTaskCount
+
+      - Label:
+          default: 'ECS EC2 network configuration:'
+        Parameters:
+          - VpcCIDR
+          - PublicSubnetOneCIDR
+          - PublicSubnetTwoCIDR
+          - PrivateSubnetOneCIDR
+          - PrivateSubnetTwoCIDR
+
+      - Label:
+          default: 'CFN templates S3 bucket configuration:'
+        Parameters:
+          - TemplateS3BucketURL
+      - Label:
+          default: 'Dev accout information configuration:'
+        Parameters:
+          - DevAccountID
+          - ArtifactsS3BucketURL
+
+Parameters:
+  CodeDeployApp:
+    Description: Name of CodeDeploy Application
+    Type: String
+    Default: CICD-CodeDeploy-Application
+  CodeDeployGroup:
+    Description: Name of CodeDeploy Deployment Group
+    Type: String
+    Default: CICD-Deployment-Group-Prod
+    AllowedValues:
+      - CICD-Deployment-Group-Prod
+      - CICD-Deployment-Group-Dev
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Existing EC2 KeyPair to enable SSH access to the ECS instances.
+  ASGDesiredCapacity:
+    Type: Number
+    Default: 2
+    Description: Desired number of instances to launch in your ECS cluster.
+  ASGMaxSize:
+    Type: Number
+    Default: 3
+    Description: Maximum number of instances can be launched in your ECS cluster.
+  ContainerImageUri:
+    Type: String
+    Default: ''
+    Description: Docker image URI
+  DesiredTaskCount:
+    Type: Number
+    Default: 2
+    Description: How many copies of the service task to run
+
+  VpcCIDR:
+    Description: CIDR for VPC
+    Type: String
+    Default: 10.192.0.0/16
+  PublicSubnetOneCIDR:
+    Description: CIDR for the public subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.10.0/24
+  PublicSubnetTwoCIDR:
+    Description: CIDR for the public subnet in the second Availability Zone
+    Type: String
+    Default: 10.192.11.0/24
+  PrivateSubnetOneCIDR:
+    Description: CIDR for the private subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.20.0/24
+  PrivateSubnetTwoCIDR:
+    Description: CIDR for the private subnet in the second Availability Zone
+    Type: String
+    Default: 10.192.21.0/24
+
+  TemplateS3BucketURL:
+    Description: >-
+      URL of CFN templates S3 bucket, Dev&Prod account separately.
+      Example: templates-bucket-name.s3.us-east-1.amazonaws.com
+    Type: String
+    Default: ''
+  DevAccountID:
+    Description: ID of Dev account
+    Type: String
+    Default: ''
+  ArtifactsS3BucketURL:
+    Description: >-
+      URL of artifacts S3 bucket in Dev account, being shared with all accounts.
+      Example: artifacts-bucket-name.s3.us-east-1.amazonaws.com
+    Type: String
+    Default: ''
+
+Mappings:
+  AWSRegionToAMI:
+    us-east-1:
+      AMIID: ami-d61027ad
+    us-east-2:
+      AMIID: ami-446f3521
+    us-west-1:
+      AMIID: ami-9fadf8ff
+    us-west-2:
+      AMIID: ami-7abc111a
+    eu-west-1:
+      AMIID: ami-a1491ad2
+    eu-central-1:
+      AMIID: ami-54f5303b
+    ap-northeast-1:
+      AMIID: ami-9cd57ffd
+    ap-southeast-1:
+      AMIID: ami-a900a3ca
+    ap-southeast-2:
+      AMIID: ami-5781be34
+
+Conditions:
+  CreateCrossAccountRole: !Equals [!Ref CodeDeployGroup, CICD-Deployment-Group-Prod]
+
+Resources:
+  #1 CodeDeploy Application
+  WebappApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Ref CodeDeployApp
+      ComputePlatform: ECS
+
+  #2 ECS Cluster, Service, Task Definition
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: cicd-ecs-cluster
+
+  ECSservice:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListener1
+    Properties:
+      Cluster: !Ref ECSCluster
+      ServiceName: cicd-ecs-service
+      TaskDefinition: !Ref ECStaskdefinition
+      LoadBalancers:
+        - TargetGroupArn: !Ref ECSTG1
+          ContainerName: ec2-web-container
+          ContainerPort: 80
+      DeploymentController:
+        Type: CODE_DEPLOY
+      DesiredCount: !Ref DesiredTaskCount
+      Role: !Ref ECSServiceRole
+      PlacementStrategies:
+        - field: instanceId
+          type: spread
+
+  ECSServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs.amazonaws.com]
+          Action: [sts:AssumeRole]
+      Path: /
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+              - 'elasticloadbalancing:DeregisterTargets'
+              - 'elasticloadbalancing:Describe*'
+              - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+              - 'elasticloadbalancing:RegisterTargets'
+              - 'ec2:Describe*'
+              - 'ec2:AuthorizeSecurityGroupIngress'
+            Resource: '*'
+
+  ECStaskdefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: cicd-ecs-ec2-container
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: ec2-web-container
+          Cpu: 10
+          Memory: 300
+          Image: !Ref ContainerImageUri
+          PortMappings:
+            - ContainerPort: 80
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudwatchLogsGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs-demo-app
+          #html page display hostname for each container
+          command:
+            - >-
+              /bin/sh -c "CONTAINERHOSTNAME=$(cat /etc/hostname)
+              && sed -i \"s/CONTAINER ID/Container hostname \$CONTAINERHOSTNAME/g\" /usr/local/apache2/htdocs/index.html
+              && httpd-foreground"
+          entryPoint: [sh, -c]
+          Essential: true
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: [sts:AssumeRole]
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+
+  CloudwatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['-', [ECSLogGroup, !Ref AWS::StackName]]
+      RetentionInDays: 14
+
+  #3 ALB, Listener, Target Group
+  ECSALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: ECSALB
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+      - Key: idle_timeout.timeout_seconds
+        Value: 30
+      Subnets:
+        - !GetAtt cicdVPCSubnets.Outputs.PublicSubnetOneID
+        - !GetAtt cicdVPCSubnets.Outputs.PublicSubnetTwoID
+      SecurityGroups: [!Ref ALBSecurityGroup]
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS ALB Security Group
+      VpcId: !GetAtt cicdVPCSubnets.Outputs.cicdVPCID
+      SecurityGroupIngress:
+          # Allow access to ALB from anywhere on the internet
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: 0.0.0.0/0
+          - IpProtocol: tcp
+            FromPort: 8080
+            ToPort: 8080
+            CidrIp: 0.0.0.0/0
+
+  ALBListener1:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref ECSTG1
+      LoadBalancerArn: !Ref ECSALB
+      Port: 80
+      Protocol: HTTP
+
+  ALBListener2:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref ECSTG2
+      LoadBalancerArn: !Ref ECSALB
+      Port: 8080
+      Protocol: HTTP
+
+  ECSTG1:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !GetAtt cicdVPCSubnets.Outputs.cicdVPCID
+      Name: cicd-ecs-bluegreen-TargetGroup1
+
+  ECSTG2:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !GetAtt cicdVPCSubnets.Outputs.cicdVPCID
+      Name: cicd-ecs-bluegreen-TargetGroup2
+
+  #4 ASG, EC2 Launch Configuration
+  ECSAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !GetAtt cicdVPCSubnets.Outputs.PrivateSubnetOneID
+        - !GetAtt cicdVPCSubnets.Outputs.PrivateSubnetTwoID
+      LaunchConfigurationName: !Ref ContainerInstances
+      MinSize: 1
+      MaxSize: !Ref ASGMaxSize
+      DesiredCapacity: !Ref ASGDesiredCapacity
+      Tags:
+      - Key: Name
+        Value: WebAppECSInstance
+        PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Count: !Ref ASGDesiredCapacity
+        Timeout: PT5M
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: true
+
+  ContainerInstances:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !FindInMap [AWSRegionToAMI, !Ref AWS::Region, AMIID]
+      SecurityGroups: [!Ref ECSInstanceSecurityGroup]
+      InstanceType: t2.micro
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      KeyName: !Ref KeyPairName
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          echo ECS_CLUSTER=${ECSCluster} >> /etc/ecs/ecs.config
+          yum install -y aws-cfn-bootstrap
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ECSAutoScalingGroup --region ${AWS::Region}
+
+  ECSInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS Instance Security Group
+      VpcId: !GetAtt cicdVPCSubnets.Outputs.cicdVPCID
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+      - SourceSecurityGroupId: !Ref ALBSecurityGroup
+        IpProtocol: tcp
+        FromPort: 31000
+        ToPort: 61000
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles: [!Ref EC2Role]
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ec2.amazonaws.com]
+          Action: [sts:AssumeRole]
+      Path: /
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - 'ecs:CreateCluster'
+              - 'ecs:DeregisterContainerInstance'
+              - 'ecs:DiscoverPollEndpoint'
+              - 'ecs:Poll'
+              - 'ecs:RegisterContainerInstance'
+              - 'ecs:StartTelemetrySession'
+              - 'ecs:Submit*'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Resource: '*'
+
+  #5 CloudWatch Alarm, adjust ECS service autoscaling
+  ALB500sAlarmScaleUp:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: 1
+      Statistic: Average
+      Threshold: 10
+      AlarmDescription: Alarm if ALB gets too many HTTP 5XX server error
+      Period: 60
+      AlarmActions: [!Ref ServiceScalingPolicy]
+      Namespace: AWS/ApplicationELB
+      Dimensions:
+      - Name: LoadBalancer
+        Value: !GetAtt ECSALB.LoadBalancerFullName
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: HTTPCode_ELB_5XX_Count
+
+  ServiceScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: AStepPolicy
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: PercentChangeInCapacity
+        Cooldown: 60
+        MetricAggregationType: Average
+        StepAdjustments:
+        - MetricIntervalLowerBound: 0
+          ScalingAdjustment: 200
+
+  ServiceScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 2
+      MinCapacity: 1
+      ResourceId: !Join ['', [service/, !Ref ECSCluster, /, !GetAtt [ECSservice, Name]]]
+      RoleARN: !GetAtt [AutoscalingRole, Arn]
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  AutoscalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [application-autoscaling.amazonaws.com]
+          Action: [sts:AssumeRole]
+      Path: /
+      Policies:
+      - PolicyName: service-autoscaling
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - 'application-autoscaling:*'
+              - 'cloudwatch:DescribeAlarms'
+              - 'cloudwatch:PutMetricAlarm'
+              - 'ecs:DescribeServices'
+              - 'ecs:UpdateService'
+            Resource: '*'
+
+  #6 nested CFN templates
+  cicdCrossAccountRole:
+    Description: Create cicd_codepipeline_cross_account_role
+    Type: AWS::CloudFormation::Stack
+    Condition: CreateCrossAccountRole
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3BucketURL}/pipeline-cicd/iam-resource/cicd_codepipeline_cross_account_role.yaml'
+      Parameters:
+        artifactsBucketName: !Select [0, !Split [".", !Ref ArtifactsS3BucketURL]]
+        DevelopmentAccountID: !Ref DevAccountID
+
+  cicdCodeDeployECSRole:
+    Description: Create CodeDeployECSBlueGreenRole
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3BucketURL}/pipeline-cicd/iam-resource/cicd_codedeploy_ecs_role.yaml'
+      Parameters:
+        artifactsBucketName: !Select [0, !Split [".", !Ref ArtifactsS3BucketURL]]
+        DevStackRegion: !Select [2, !Split [".", !Ref ArtifactsS3BucketURL]]
+        DevAccountID: !Ref DevAccountID
+
+  cicdVPCSubnets:
+    Description: Create VPC and Subnets
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3BucketURL}/pipeline-cicd/cfn-template/cicd-VPC-Subnets.yaml'
+      Parameters:
+        VpcCIDR: !Ref VpcCIDR
+        PublicSubnetOneCIDR: !Ref PublicSubnetOneCIDR
+        PublicSubnetTwoCIDR: !Ref PublicSubnetTwoCIDR
+        PrivateSubnetOneCIDR: !Ref PrivateSubnetOneCIDR
+        PrivateSubnetTwoCIDR: !Ref PrivateSubnetTwoCIDR
+
+Outputs:
+  ECSALB:
+    Description: Application URL
+    Value: !GetAtt ECSALB.DNSName

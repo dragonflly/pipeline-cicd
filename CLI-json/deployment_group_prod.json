@@ -1,0 +1,45 @@
+{
+	"applicationName": "CICD-CodeDeploy-Application",
+	"deploymentGroupName": "CICD-Deployment-Group-Prod",
+	"deploymentConfigName": "CodeDeployDefault.ECSLinear10PercentEvery1Minutes",
+	"serviceRoleArn": "arn:aws:iam::222222222222:role/CodeDeployECSBlueGreenRole",
+
+	"deploymentStyle": {
+		"deploymentType": "BLUE_GREEN",
+		"deploymentOption": "WITH_TRAFFIC_CONTROL"
+	},
+	"blueGreenDeploymentConfiguration": {
+		"terminateBlueInstancesOnDeploymentSuccess": {
+			"action": "TERMINATE",
+			"terminationWaitTimeInMinutes": 1
+		},
+		"deploymentReadyOption": {
+			"actionOnTimeout": "CONTINUE_DEPLOYMENT"
+		}
+	},
+	"loadBalancerInfo": {
+		"targetGroupPairInfoList": [{
+			"targetGroups": [{
+					"name": "cicd-ecs-bluegreen-TargetGroup1"
+				},
+				{
+					"name": "cicd-ecs-bluegreen-TargetGroup2"
+				}
+			],
+			"prodTrafficRoute": {
+				"listenerArns": [
+					"arn:aws:elasticloadbalancing:us-east-1:222222222222:listener/app/ECSALB/c2494cf93ef9cf76/98b1868b8aa18516"
+				]
+			},
+			"testTrafficRoute": {
+				"listenerArns": [
+					"arn:aws:elasticloadbalancing:us-east-1:222222222222:listener/app/ECSALB/c2494cf93ef9cf76/cc45dc324aeb6b37"
+				]
+			}
+		}]
+	},
+	"ecsServices": [{
+		"serviceName": "cicd-ecs-service",
+		"clusterName": "cicd-ecs-cluster"
+	}]
+}
