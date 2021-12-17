@@ -493,5 +493,15 @@ Two AWS accounts, each has a IAM user
 #### 4.5 Manual approval to deploy to _`Prod account`_
 - Copy EC2 instance IP into web browser, to check EC2 deployment group in Prod
 
+## Create VPC and Subnets with Terraform (Optional)
+Replace CloudFormation nested stack with Terraform:
+```
+    cd terraform
+    terraform init
+    terraform plan
+    terraform apply --auto-approve
+```
+&nbsp; &nbsp; &nbsp; You must change CFN templates to adapt terraform
+
 ## License Summary
 This code is made available under the MIT license. See the LICENSE file.
